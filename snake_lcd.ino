@@ -91,45 +91,47 @@ const uint8_t GLYPH_BODY_A = 1;
 const uint8_t GLYPH_BODY_B = 2;
 const uint8_t GLYPH_FOOD   = 3;
 
-// 5x8 pixel designs (one byte per row, low 5 bits used)
+// 5x8 pixel designs (one byte per row, low 5 bits used).
+// The snake is deliberately smaller than its cell: 3 pixels wide and 5
+// tall, centred, so it does not fill the whole character box.
 byte glyphHead[8] = {
+  0x00, // .....
   0x0E, // .###.
-  0x1F, // #####
-  0x17, // #.###   <- eye
-  0x1F, // #####
-  0x1F, // #####
-  0x1F, // #####
-  0x1F, // #####
-  0x0E  // .###.
+  0x0E, // .###.
+  0x0A, // .#.#.   <- eyes
+  0x0E, // .###.
+  0x04, // ..#..   <- taper toward the body
+  0x00, // .....
+  0x00  // .....
 };
 byte glyphBodyA[8] = {
-  0x0E, // .###.
-  0x1F, // #####
-  0x1F, // #####
-  0x1F, // #####
-  0x1F, // #####
-  0x1F, // #####
-  0x1F, // #####
-  0x0E  // .###.
-};
-byte glyphBodyB[8] = {
-  0x0E, // .###.
-  0x1F, // #####
-  0x1B, // ##.##
-  0x1F, // #####
-  0x1F, // #####
-  0x1B, // ##.##
-  0x1F, // #####
-  0x0E  // .###.
-};
-byte glyphFood[8] = {
   0x00, // .....
   0x04, // ..#..
   0x0E, // .###.
-  0x1F, // #####
-  0x1F, // #####
+  0x0E, // .###.
   0x0E, // .###.
   0x04, // ..#..
+  0x00, // .....
+  0x00  // .....
+};
+byte glyphBodyB[8] = {
+  0x00, // .....
+  0x04, // ..#..
+  0x0E, // .###.
+  0x0A, // .#.#.
+  0x0E, // .###.
+  0x04, // ..#..
+  0x00, // .....
+  0x00  // .....
+};
+byte glyphFood[8] = {
+  0x00, // .....
+  0x00, // .....
+  0x04, // ..#..
+  0x0E, // .###.
+  0x04, // ..#..
+  0x00, // .....
+  0x00, // .....
   0x00  // .....
 };
 
