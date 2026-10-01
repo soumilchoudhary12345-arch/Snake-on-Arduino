@@ -1,172 +1,95 @@
 /* ==========================================================================
- *  SNAKE  -  Arduino Uno + JHD162A 16x2 character LCD
+ *  SNAKE  -  Arduino Uno + JHD162A 16x2 LCD (4-pin I2C version)
  * ==========================================================================
  *
- *  A complete, standalone Snake game.  The whole 16x2 display is used as
- *  the game board (16 columns x 2 rows = 32 cells).  Only the standard
- *  LiquidCrystal library (ships with the Arduino IDE) is required.
+ *  A small, standalone Snake game.  The whole 16x2 display is the game board
+ *  (16 columns x 2 rows = 32 cells).  The LCD is a JHD162A with a mounted
+ *  I2C backpack, so it only has 4 pins and needs just 2 Arduino pins.
+ *
+ *  The game is controlled ONLY with the arrow keys, through the Serial
+ *  Monitor (115200 baud).  No push buttons are used.
  *
  *  --------------------------------------------------------------------------
- *  REQUIRED HARDWARE
+ *  HARDWARE / WIRING
  *  --------------------------------------------------------------------------
  *    - Arduino Uno (or compatible)
- *    - JHD162A 16x2 LCD, HD44780-compatible, 4-bit interface
- *    - 4x momentary push buttons (tactile switches)
- *    - 1x 10k potentiometer (LCD contrast)  [or two 1k resistors]
- *    - 1x 220 - 330 ohm resistor (backlight)
- *    - Breadboard + jumper wires
+ *    - JHD162A 16x2 LCD with 4-pin I2C backpack (PCF8574)
+ *
+ *    LCD pin | Name | Arduino
+ *    --------+------+--------
+ *      GND   | GND  | GND
+ *      VCC   | VCC  | 5V
+ *      SDA   | SDA  | A4
+ *      SCL   | SCL  | A5
+ *
+ *    The small blue trimmer on the backpack sets the contrast.
+ *    The backpack jumper enables the backlight.
+ *
+ *    I2C address: normally 0x27, on some boards 0x3F.  Both are scanned
+ *    automatically at startup, so no setting is required.  If neither
+ *    answers, the built-in LED (D13) blinks fast and the reason is printed
+ *    on the Serial Monitor - that means the backpack is not wired right.
+ *
+ *    A4/A5 are the only pins the LCD uses, so D2..D13 and A0..A3 are free.
  *
  *  --------------------------------------------------------------------------
- *  WIRING
+ *  HOW TO PLAY
  *  --------------------------------------------------------------------------
+ *    1. Upload the sketch.
+ *    2. Open the Serial Monitor at 115200 baud ("No line ending").
+ *    3. The ENTRY PAGE ("SNAKE" + blinking "press arrow key") appears and
+ *       stays there until you press an arrow key - that starts the game.
+ *    4. Use the arrow keys of your keyboard:
+ *           ^ = up,  v = down,  < = left,  > = right
+ *    5. GAME OVER / YOU WIN is followed by the same entry page again;
+ *       press any arrow key there to play another round.
  *
- *  LCD connector (JHD162A, 16 pins, numbered 1..16 left to right)
- *
- *   LCD pin | Name | Connects to             | Purpose
- *   --------+------+-------------------------+---------------------------
- *      1    | VSS  | Arduino GND             | Ground
- *      2    | VDD  | Arduino 5V              | +5 V power
- *      3    | VO   | Potentiometer wiper     | Contrast (see below)
- *      4    | RS   | Arduino pin 12          | Register select
- *      5    | RW   | Arduino GND             | Read/Write: tie LOW (write)
- *      6    | E    | Arduino pin 11          | Enable
- *      7    | D0   | not connected           | 4-bit mode -> D0..D3 unused
- *      8    | D1   | not connected           |
- *      9    | D2   | not connected           |
- *     10    | D3   | not connected           |
- *     11    | D4   | Arduino pin 5           | Data bit 4
- *     12    | D5   | Arduino pin 4           | Data bit 5
- *     13    | D6   | Arduino pin 3           | Data bit 6
- *     14    | D7   | Arduino pin 2           | Data bit 7
- *     15    | A    | 5V -- 220R -- pin 15    | Backlight anode (+)
- *     16    | K    | Arduino GND             | Backlight cathode (-)
- *
- *  Contrast potentiometer (10k):
- *
- *      5V ---[ potentiometer ]--- GND
- *                   |
- *                wiper  --->  LCD pin 3 (VO)
- *
- *      (No pot?  5V -- 1k -- VO -- 1k -- GND also gives a usable contrast.)
- *
- *  Buttons - one leg to the Arduino pin, the other leg to GND.
- *  Internal pull-ups are enabled in software (INPUT_PULLUP), so NO external
- *  resistors are required.  A pressed button reads LOW.
- *
- *   Button | Arduino pin | Other leg | Purpose
- *   -------+-------------+-----------+---------
- *     UP   | A0          | GND       | move up
- *     DOWN | A1          | GND       | move down
- *     LEFT | A2          | GND       | move left
- *     RIGHT| A3          | GND       | move right
- *
- *  ALL BUTTONS ARE OPTIONAL.  The game can be played entirely over USB
- *  serial - open the Serial Monitor at 115200 baud and send w / a / s / d
- *  (or the arrow keys).  Unconnected button pins read HIGH with the
- *  internal pull-ups, so they are simply ignored.
- *
- *  --------------------------------------------------------------------------
- *  DESIGN NOTES
- *  --------------------------------------------------------------------------
- *  * HD44780 limitation: a 16x2 LCD has only 32 visible character cells and
- *    8 custom-character slots (0..7).  There is no pixel-level drawing, so
- *    the game board IS the character grid: one cell of the board equals one
- *    character cell of the LCD.
- *
- *  * Board representation: every cell is a single byte "index"
- *        index = row * 16 + col     (row = 0..1, col = 0..15, index = 0..31)
- *    This keeps the whole board in one byte per snake segment (32 bytes max)
- *    and makes bounds/occupancy checks trivial.
- *
- *  * The snake is an ordered byte array: snake[0] = head, snake[len-1] =
- *    tail.  Moving = shift the array one slot and insert the new head.
- *    At <= 32 bytes this is cheaper (RAM-wise) than any linked structure
- *    and needs no dynamic memory.
- *
- *  * Graphics: 4 of the 8 custom slots are used
- *        slot 0 = head, slot 1/2 = alternating body segments, slot 3 = food.
- *    If the custom characters do not render on your LCD, hold RIGHT while
- *    powering on - the game then falls back to plain ASCII (@ # *).
- *
- *  * Timing: everything runs from millis() in loop(); delay() is never used,
- *    so buttons stay responsive.  Buttons are sampled every loop and
- *    debounced with a 30 ms stability window (INPUT_PULLUP, active LOW).
- *
- *  * Score: the board fills the display completely, so the score cannot be
- *    shown permanently.  It is flashed for 500 ms on the top row whenever
- *    food is eaten (game pauses meanwhile, input stays buffered), and it is
- *    shown on the GAME OVER / WIN screens.
- *
- *  * Direction reversal: direction codes are chosen so that the opposite of
- *    any direction is (dir ^ 1); attempts to reverse 180 degrees are
- *    discarded by setDirection().
+ *    Libraries (Library Manager): "LiquidCrystal I2C" by Frank de Brabander.
  * ========================================================================== */
 
-#include <LiquidCrystal.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
-// ===================== HARDWARE PIN DEFINITIONS ===========================
-// (change these only - everything else follows)
+// ========================== LCD (I2C) ======================================
+// Addresses tried at startup; the first one that answers wins.
+const uint8_t LCD_ADDR_A = 0x27;
+const uint8_t LCD_ADDR_B = 0x3F;
 
-const uint8_t PIN_LCD_RS = 12;   // LCD RS
-const uint8_t PIN_LCD_E  = 11;   // LCD E
-const uint8_t PIN_LCD_D4 = 5;    // LCD D4
-const uint8_t PIN_LCD_D5 = 4;    // LCD D5
-const uint8_t PIN_LCD_D6 = 3;    // LCD D6
-const uint8_t PIN_LCD_D7 = 2;    // LCD D7
-
-const uint8_t PIN_BTN_UP    = A0;
-const uint8_t PIN_BTN_DOWN  = A1;
-const uint8_t PIN_BTN_LEFT  = A2;
-const uint8_t PIN_BTN_RIGHT = A3;
-
-LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_E, PIN_LCD_D4, PIN_LCD_D5,
-                  PIN_LCD_D6, PIN_LCD_D7);
+LiquidCrystal_I2C *lcd = nullptr;   // created in setup() once the address is known
 
 // ========================== GAME TUNING ====================================
-const uint8_t COLS = 16;                 // board columns (LCD columns)
-const uint8_t ROWS = 2;                  // board rows    (LCD rows)
+const uint8_t COLS = 16;                 // LCD columns
+const uint8_t ROWS = 2;                  // LCD rows
 const uint8_t BOARD_CELLS = COLS * ROWS; // 32 playable cells
 
-const unsigned long MOVE_INTERVAL_MS = 150; // speed: ms per snake cell (lower = faster)
-const unsigned long DEBOUNCE_MS      = 30;  // button debounce window
-const unsigned long TITLE_MS         = 1500;// "SNAKE" shown this long at power-on
+const unsigned long MOVE_INTERVAL_MS = 150; // ms per snake cell (lower = faster)
 const unsigned long SCORE_FLASH_MS   = 500; // score shown after eating food
-const unsigned long BLINK_MS         = 400; // prompt blink period
+const unsigned long BLINK_MS         = 400; // entry-page hint blink period
 
 const uint8_t START_LENGTH  = 3;   // snake length at game start
 const uint8_t FOOD_ATTEMPTS = 64;  // random tries before scanning every cell
-const bool    USE_CUSTOM_CHARS_DEFAULT = true; // false = ASCII graphics only
 
 // ========================== DIRECTIONS =====================================
-// Order matters: UP/DOWN share bit 0, LEFT/RIGHT share bit 0, therefore the
-// opposite direction is always (dir ^ 1).  Button indices (see BTN_PINS
-// below) use the same order, so button index == direction code.
+// The opposite of any direction is (dir ^ 1); the arrow-key code of a
+// direction is the same index, so decoding a key gives the direction.
 const uint8_t DIR_UP = 0, DIR_DOWN = 1, DIR_LEFT = 2, DIR_RIGHT = 3;
 const int8_t  DIR_DX[4] = { 0, 0, -1, 1 };   // column delta per direction
 const int8_t  DIR_DY[4] = { -1, 1, 0, 0 };   // row delta per direction
 
 // ========================== GAME STATES ====================================
 enum GameState : uint8_t {
-  STATE_TITLE,     // "SNAKE" splash
-  STATE_PROMPT,    // "Press any key" (blinking), waits for a button
+  STATE_ENTRY,     // entry page: "SNAKE" + blinking hint, waits for a key
   STATE_PLAYING,   // normal gameplay
-  STATE_FLASH,     // score overlay after eating (short, non-blocking pause)
-  STATE_GAMEOVER,  // collision -> "GAME OVER" + score, waits for a button
-  STATE_WIN        // snake filled the board -> "YOU WIN!" + score
+  STATE_FLASH,     // score overlay after eating (short pause)
+  STATE_GAMEOVER,  // collision -> "GAME OVER" + score
+  STATE_WIN        // board full -> "YOU WIN!" + score
 };
 
 // ===================== CUSTOM CHARACTER GLYPHS =============================
-// 4 of the 8 available HD44780 slots are used (0..3).
 const uint8_t GLYPH_HEAD   = 0;
 const uint8_t GLYPH_BODY_A = 1;
 const uint8_t GLYPH_BODY_B = 2;
 const uint8_t GLYPH_FOOD   = 3;
-
-// Plain-ASCII fallback (used when custom chars are disabled)
-const uint8_t ASCII_HEAD   = '@';
-const uint8_t ASCII_BODY_A = '#';
-const uint8_t ASCII_BODY_B = '#';
-const uint8_t ASCII_FOOD   = '*';
 
 // 5x8 pixel designs (one byte per row, low 5 bits used)
 byte glyphHead[8] = {
@@ -212,28 +135,18 @@ byte glyphFood[8] = {
 
 // ========================== GAME STATE DATA ================================
 // (fixed-size static data only - no String, no malloc)
-uint8_t snake[BOARD_CELLS];    // snake[0] = head, snake[snakeLen-1] = tail
+uint8_t snake[BOARD_CELLS];     // snake[0] = head, snake[snakeLen-1] = tail
 uint8_t snakeLen = START_LENGTH;
-uint8_t foodPos   = 0;         // board index of the food (0..31)
+uint8_t foodPos   = 0;          // board index of the food (0..31)
 uint8_t score     = 0;
-uint8_t dir       = DIR_RIGHT; // direction the head currently moves
-uint8_t pendingDir = DIR_RIGHT;// direction queued by the buttons
-GameState state = STATE_TITLE;
-bool useCustomChars = USE_CUSTOM_CHARS_DEFAULT;
+uint8_t dir       = DIR_RIGHT;  // direction the head currently moves
+uint8_t pendingDir = DIR_RIGHT; // direction queued by the arrow keys
+GameState state = STATE_ENTRY;
 
 unsigned long stateStartMs = 0;  // when the current state began
 unsigned long lastMoveMs   = 0;  // when the snake last moved
-unsigned long blinkMs      = 0;  // prompt blink timer
+unsigned long blinkMs      = 0;  // when the entry-page hint toggled
 bool blinkOn = true;
-
-// ========================== BUTTON DEBOUNCING ==============================
-const uint8_t NUM_BTNS = 4;
-// Order MUST be UP, DOWN, LEFT, RIGHT so index == direction code.
-const uint8_t BTN_PINS[NUM_BTNS] = { PIN_BTN_UP, PIN_BTN_DOWN,
-                                     PIN_BTN_LEFT, PIN_BTN_RIGHT };
-bool     btnPressed[NUM_BTNS];      // debounced state (true = held down)
-bool     btnRaw[NUM_BTNS];          // last raw sample
-unsigned long btnLastChange[NUM_BTNS];
 
 // ============================ HELPERS ======================================
 uint8_t colOf(uint8_t idx) { return idx & 0x0F; }   // board index -> column
@@ -247,13 +160,12 @@ bool cellOccupied(uint8_t pos) {
   return false;
 }
 
-// Place food on a free, in-bounds cell.  Tries random positions first,
-// then scans every cell, so it ALWAYS finds a spot unless the board is
-// completely full (returns false only in that case -> win).
+// Place food on a free cell.  Random tries first, then a full scan, so it
+// always finds a spot unless the board is full (returns false -> win).
 bool spawnFood() {
   for (uint8_t t = 0; t < FOOD_ATTEMPTS; t++) {
     uint8_t pos = (uint8_t)random(BOARD_CELLS);
-    if (pos < BOARD_CELLS && !cellOccupied(pos)) {  // robustness double-check
+    if (!cellOccupied(pos)) {
       foodPos = pos;
       return true;
     }
@@ -267,85 +179,88 @@ bool spawnFood() {
   return false;
 }
 
-// Character to draw in board cell idx (custom glyph or ASCII fallback).
+// Character to draw in board cell idx.
 uint8_t cellGlyph(uint8_t idx) {
-  if (idx == foodPos) return useCustomChars ? GLYPH_FOOD : ASCII_FOOD;
+  if (idx == foodPos) return GLYPH_FOOD;
   for (uint8_t i = 0; i < snakeLen; i++) {
     if (snake[i] == idx) {
-      if (i == 0) return useCustomChars ? GLYPH_HEAD : ASCII_HEAD;
-      if (i & 1)  return useCustomChars ? GLYPH_BODY_B : ASCII_BODY_B;
-      return useCustomChars ? GLYPH_BODY_A : ASCII_BODY_A;
+      if (i == 0) return GLYPH_HEAD;
+      return (i & 1) ? GLYPH_BODY_B : GLYPH_BODY_A;
     }
   }
   return (uint8_t)' ';
 }
 
-// Full redraw of both rows.  Unchanged cells receive the same character
-// again, which is visually identical - so there is no flicker.
+// Full redraw of both rows.  Unchanged cells get the same character again,
+// which is visually identical, so there is no flicker.
 void drawBoard() {
   for (uint8_t row = 0; row < ROWS; row++) {
-    lcd.setCursor(0, row);
+    lcd->setCursor(0, row);
     uint8_t base = row * COLS;
     for (uint8_t col = 0; col < COLS; col++) {
-      lcd.write(cellGlyph(base + col));
+      lcd->write(cellGlyph(base + col));
     }
   }
 }
 
 // ============================ SCREENS ======================================
-void drawPromptText() {
-  // "Press any key" is 13 chars -> centered at column 1
-  lcd.setCursor(1, 0);
+// ---------------- ENTRY PAGE (shown at boot and after every game) ----------
+void drawEntryHint() {
+  lcd->setCursor(0, 1);
   if (blinkOn) {
-    lcd.print(F("Press any key"));
+    lcd->print(F("press arrow key"));        // 15 chars -> cols 0..14
   } else {
-    for (uint8_t i = 0; i < 13; i++) lcd.write(' ');
+    for (uint8_t i = 0; i < COLS; i++) lcd->write(' ');
   }
 }
 
-void showPrompt() {
-  state = STATE_PROMPT;
-  lcd.clear();
+void showEntry() {
+  state = STATE_ENTRY;
+  lcd->clear();
+  lcd->setCursor(5, 0);                       // "SNAKE" = 5 chars -> col 5
+  lcd->print(F("SNAKE"));
   blinkOn = true;
   blinkMs = millis();
-  drawPromptText();
+  drawEntryHint();
+  Serial.println(F("Entry page - press an arrow key to start"));
 }
 
 void printScoreLine() {
-  // "Score: " = 7 chars + 1 or 2 digits -> centered
+  // "Score: " = 7 chars + 1 or 2 digits -> centered on the bottom row
   uint8_t len = (score < 10) ? 8 : 9;
-  lcd.setCursor((COLS - len) / 2, 1);
-  lcd.print(F("Score: "));
-  lcd.print(score);
+  lcd->setCursor((COLS - len) / 2, 1);
+  lcd->print(F("Score: "));
+  lcd->print(score);
 }
 
 void gameOver() {
   state = STATE_GAMEOVER;
-  lcd.clear();
-  lcd.setCursor(3, 0);                 // "GAME OVER" = 9 chars -> col 3
-  lcd.print(F("GAME OVER"));
+  lcd->clear();
+  lcd->setCursor(3, 0);                 // "GAME OVER" = 9 chars -> col 3
+  lcd->print(F("GAME OVER"));
   printScoreLine();
+  Serial.println(F("GAME OVER - press an arrow key to go back to the title"));
 }
 
 void showWin() {
   state = STATE_WIN;
-  lcd.clear();
-  lcd.setCursor(4, 0);                 // "YOU WIN!" = 8 chars -> col 4
-  lcd.print(F("YOU WIN!"));
+  lcd->clear();
+  lcd->setCursor(4, 0);                 // "YOU WIN!" = 8 chars -> col 4
+  lcd->print(F("YOU WIN!"));
   printScoreLine();
+  Serial.println(F("YOU WIN! - press an arrow key to go back to the title"));
 }
 
-// Score overlay: written over the TOP row only, so the bottom row still
-// shows part of the board while the game is paused.
+// Score overlay on the TOP row only: the bottom row still shows the board.
 void enterScoreFlash() {
   state = STATE_FLASH;
   stateStartMs = millis();
-  lcd.setCursor(0, 0);
-  for (uint8_t i = 0; i < COLS; i++) lcd.write(' ');
+  lcd->setCursor(0, 0);
+  for (uint8_t i = 0; i < COLS; i++) lcd->write(' ');
   uint8_t len = (score < 10) ? 8 : 9;
-  lcd.setCursor((COLS - len) / 2, 0);
-  lcd.print(F("Score: "));
-  lcd.print(score);
+  lcd->setCursor((COLS - len) / 2, 0);
+  lcd->print(F("Score: "));
+  lcd->print(score);
 }
 
 void endScoreFlash() {
@@ -359,6 +274,9 @@ void startGame() {
   score    = 0;
   snakeLen = START_LENGTH;
   dir = pendingDir = DIR_RIGHT;
+
+  // every round gets a different food pattern (the key press time differs)
+  randomSeed(micros() ^ (unsigned long)analogRead(A0));
 
   // Head on row 0, column 5; body trailing to the left (index = row*16+col)
   snake[0] = 5;
@@ -394,8 +312,8 @@ void moveSnake() {
   uint8_t newHead = (uint8_t)(newRow * COLS + newCol);
   bool eating = (newHead == foodPos);
 
-  // 2) self collision - when not eating, the tail cell frees up this tick,
-  //    so running into the current tail is legal.
+  // 2) self collision - when not eating the tail frees up this tick, so
+  //    running into the current tail is legal
   uint8_t checkCount = eating ? snakeLen : (uint8_t)(snakeLen - 1);
   for (uint8_t i = 0; i < checkCount; i++) {
     if (snake[i] == newHead) {
@@ -421,54 +339,36 @@ void moveSnake() {
   }
 }
 
-// ============================ INPUT ========================================
-// Classic per-pin debounce: a state change is accepted only after it has
-// been stable for DEBOUNCE_MS.  onButtonPress() fires on the pressed edge.
-void pollButtons(unsigned long now) {
-  for (uint8_t i = 0; i < NUM_BTNS; i++) {
-    bool raw = (digitalRead(BTN_PINS[i]) == LOW);
-    if (raw != btnRaw[i]) {
-      btnRaw[i] = raw;
-      btnLastChange[i] = now;
-    }
-    if (raw != btnPressed[i] && (now - btnLastChange[i]) >= DEBOUNCE_MS) {
-      btnPressed[i] = raw;
-      if (btnPressed[i]) onButtonPress(i);
-    }
-  }
-}
-
-void onButtonPress(uint8_t idx) {   // idx: 0=UP 1=DOWN 2=LEFT 3=RIGHT
-  switch (state) {
-    case STATE_PROMPT:
-      startGame();                  // any button starts the game
-      break;
-    case STATE_PLAYING:
-      setDirection(idx);
-      break;
-    case STATE_FLASH:
-      endScoreFlash();              // any button dismisses the score...
-      setDirection(idx);            // ...and the direction is buffered
-      break;
-    case STATE_GAMEOVER:
-    case STATE_WIN:
-      startGame();                  // any button restarts
-      break;
-    case STATE_TITLE:
-    default:
-      break;                        // splash ignores input
-  }
-}
-
-// ============================ SERIAL INPUT ================================
-// Buttons are optional: the same events are accepted over USB serial at
-// 115200 baud.  w/a/s/d (any case) map to UP/LEFT/DOWN/RIGHT; the ANSI
-// arrow-key sequences (ESC '[' 'A'..'D') are decoded too, so the arrow
-// keys of the Serial Monitor work.  Anything else (newline, garbage) is
-// ignored.
+// ============================ ARROW-KEY INPUT ==============================
+// The Serial Monitor sends the usual ANSI escape sequence for an arrow key:
+//     ESC  '['  'A' (up) / 'B' (down) / 'C' (right) / 'D' (left)
+// Everything else (newlines, stray characters) is ignored.
 const unsigned long ESC_TIMEOUT_MS = 50;
 uint8_t        escState = 0;   // 0 = idle, 1 = saw ESC, 2 = saw ESC '['
 unsigned long  escAtMs  = 0;
+
+// An arrow key arrived: start / steer / restart, depending on the state.
+void onArrowKey(uint8_t d) {
+  switch (state) {
+    case STATE_PLAYING:
+      setDirection(d);
+      break;
+    case STATE_FLASH:
+      endScoreFlash();      // dismiss the score...
+      setDirection(d);      // ...and keep the turn that was pressed
+      break;
+    case STATE_GAMEOVER:
+    case STATE_WIN:
+      showEntry();          // every game ends on the entry page again
+      break;
+    case STATE_ENTRY:
+      startGame();          // any arrow key starts a round...
+      setDirection(d);      // ...and the pressed direction counts right away
+      break;
+    default:
+      break;
+  }
+}
 
 void pollSerial(unsigned long now) {
   if (escState && (now - escAtMs) >= ESC_TIMEOUT_MS) escState = 0;
@@ -476,13 +376,13 @@ void pollSerial(unsigned long now) {
   while (Serial.available()) {
     char c = (char)Serial.read();
 
-    if (escState == 2) {              // third byte of an arrow-key sequence
+    if (escState == 2) {              // third byte of the arrow sequence
       escState = 0;
       switch (c) {
-        case 'A': onButtonPress(DIR_UP);    break;
-        case 'B': onButtonPress(DIR_DOWN);  break;
-        case 'C': onButtonPress(DIR_RIGHT); break;
-        case 'D': onButtonPress(DIR_LEFT);  break;
+        case 'A': onArrowKey(DIR_UP);    break;
+        case 'B': onArrowKey(DIR_DOWN);  break;
+        case 'C': onArrowKey(DIR_RIGHT); break;
+        case 'D': onArrowKey(DIR_LEFT);  break;
         default:  break;
       }
       continue;
@@ -490,81 +390,84 @@ void pollSerial(unsigned long now) {
     if (c == (char)0x1B) { escState = 1; escAtMs = now; continue; }
     if (escState == 1) {              // expected '[' but got something else
       escState = 0;
-      if (c != '[') continue;         // lone ESC or malformed sequence: drop
+      if (c != '[') continue;
       escState = 2;
       continue;
     }
+    // any byte outside a sequence is not an arrow key -> ignored
+  }
+}
 
-    switch (c) {
-      case 'w': case 'W': onButtonPress(DIR_UP);    break;
-      case 's': case 'S': onButtonPress(DIR_DOWN);  break;
-      case 'a': case 'A': onButtonPress(DIR_LEFT);  break;
-      case 'd': case 'D': onButtonPress(DIR_RIGHT); break;
-      default:  break;                // '\n', '\r', stray chars: ignore
-    }
+// ============================ LCD STARTUP ==================================
+// Finds the backpack (0x27 or 0x3F) and builds the lcd object.  Returns
+// false when nothing answers on the I2C bus.
+bool beginLcd() {
+  const uint8_t candidates[2] = { LCD_ADDR_A, LCD_ADDR_B };
+  uint8_t addr = 0;
+
+  for (uint8_t i = 0; i < 2; i++) {
+    Wire.beginTransmission(candidates[i]);
+    if (Wire.endTransmission() == 0) { addr = candidates[i]; break; }
+  }
+  if (addr == 0) return false;
+
+  lcd = new LiquidCrystal_I2C(addr, COLS, ROWS);
+  lcd->init();
+  lcd->backlight();
+  lcd->createChar(GLYPH_HEAD, glyphHead);
+  lcd->createChar(GLYPH_BODY_A, glyphBodyA);
+  lcd->createChar(GLYPH_BODY_B, glyphBodyB);
+  lcd->createChar(GLYPH_FOOD, glyphFood);
+
+  Serial.print(F("LCD found at 0x"));
+  Serial.println(addr, HEX);
+  return true;
+}
+
+// Fast-blink D13 so a dead LCD is obvious without a Serial Monitor.
+void lcdErrorBlink() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  bool on = false;
+  while (true) {
+    on = !on;
+    digitalWrite(LED_BUILTIN, on ? HIGH : LOW);
+    delay(150);
   }
 }
 
 // ============================ MAIN =========================================
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("SNAKE: send w/a/s/d or arrow keys to play"));
+  Serial.println(F("SNAKE - arrow keys only (115200, no line ending)"));
 
-  for (uint8_t i = 0; i < NUM_BTNS; i++) {
-    pinMode(BTN_PINS[i], INPUT_PULLUP);   // buttons: pin <-> GND, no resistors
+  Wire.begin();
+  if (!beginLcd()) {
+    Serial.println(F("ERROR: I2C LCD not found - check SDA=A4, SCL=A5, 5V, GND"));
+    lcdErrorBlink();
   }
 
-  lcd.begin(COLS, ROWS);
-
-  // Hold RIGHT while powering on / resetting to force plain-ASCII graphics
-  // in case the custom characters do not render on your particular LCD.
-  useCustomChars = USE_CUSTOM_CHARS_DEFAULT;
-  if (digitalRead(PIN_BTN_RIGHT) == LOW) useCustomChars = false;
-
-  if (useCustomChars) {
-    lcd.createChar(GLYPH_HEAD, glyphHead);
-    lcd.createChar(GLYPH_BODY_A, glyphBodyA);
-    lcd.createChar(GLYPH_BODY_B, glyphBodyB);
-    lcd.createChar(GLYPH_FOOD, glyphFood);
+  // A0 is left floating (nothing is connected to it): it picks up noise,
+  // which is mixed with micros() so the food pattern changes every reset.
+  unsigned long seed = micros();
+  for (uint8_t i = 0; i < 8; i++) {
+    seed = (seed << 3) ^ (seed >> 5) ^ (unsigned long)analogRead(A0);
   }
-
-  // A4 is intentionally left floating: it picks up noise, mixed with
-  // micros(), so food placement differs from power-on to power-on.
-  unsigned long seed = ((unsigned long)analogRead(A4) << 16) ^ micros();
   randomSeed(seed);
 
-  // Sample buttons once so a button already held at boot is not seen as
-  // a fresh press (only a new pressed edge triggers onButtonPress()).
-  unsigned long now = millis();
-  for (uint8_t i = 0; i < NUM_BTNS; i++) {
-    btnRaw[i] = (digitalRead(BTN_PINS[i]) == LOW);
-    btnPressed[i] = btnRaw[i];
-    btnLastChange[i] = now;
-  }
-
-  // Startup screen: "SNAKE"
-  lcd.clear();
-  lcd.setCursor(5, 0);              // "SNAKE" = 5 chars -> col 5
-  lcd.print(F("SNAKE"));
-  state = STATE_TITLE;
-  stateStartMs = now;
+  // Entry page stays on screen until the first arrow key is pressed
+  showEntry();
 }
 
 void loop() {
   unsigned long now = millis();
-  pollButtons(now);                 // input runs every pass -> no delay()
-  pollSerial(now);                  // USB serial steering (no buttons needed)
+  pollSerial(now);
 
   switch (state) {
-    case STATE_TITLE:
-      if (now - stateStartMs >= TITLE_MS) showPrompt();
-      break;
-
-    case STATE_PROMPT:
-      if (now - blinkMs >= BLINK_MS) {
+    case STATE_ENTRY:
+      if (now - blinkMs >= BLINK_MS) {   // blink "press arrow key"
         blinkMs = now;
         blinkOn = !blinkOn;
-        drawPromptText();
+        drawEntryHint();
       }
       break;
 
@@ -581,6 +484,6 @@ void loop() {
 
     case STATE_GAMEOVER:
     case STATE_WIN:
-      break;                        // wait for a button press
+      break;                        // wait for an arrow key
   }
 }
