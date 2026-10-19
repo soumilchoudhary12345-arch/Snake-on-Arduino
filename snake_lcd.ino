@@ -55,15 +55,14 @@
  *
  *        16 columns x 4 half-rows  =  64 playable cells
  *
- *    Snake AND food are drawn as ONE single pixel, centred in their
- *    playfield cell, so the whole 16x2 display is enough to play on.
+ *    The snake is drawn as thin 3-pixel bars, so the whole body reads as
+ *    one slim connected line.  The food is a FAT full-width bar that blinks
+ *    (on/off every 450 ms) - the shapes are different, so the target never
+ *    gets confused with the body.
  *
- *    Because a one-pixel food looks exactly like a one-pixel snake
- *    segment, the food BLINKS (on/off every 450 ms) - that is what tells
- *    the two apart on screen.
- *
- *    Only 3 custom characters are needed (dot in the upper half, dot in
- *    the lower half, dot in both halves); their content is built at boot.
+ *    Eight custom characters are used: thin snake bars (upper/lower/both),
+ *    fat food bars (upper/lower), the two mixed cells where food and snake
+ *    share one character, and a full square for the title screen.
  *
  *  --------------------------------------------------------------------------
  *  RULES
@@ -71,8 +70,8 @@
  *    * The snake PHASES through the edges: leaving the screen on one side
  *      it reappears on the opposite side (the board wraps around), so the
  *      walls never kill it.
- *    * The snake is always exactly 4 blocks long.  Eating food scores a
- *      point and moves the food somewhere else, but the snake NEVER grows.
+ *    * The snake starts 4 blocks long and GROWS by one block for every food
+ *      it eats.  Eating food also scores a point and moves the food.
  *    * The game only ends when the snake runs into ITSELF.
  * ========================================================================== */
 
@@ -94,8 +93,8 @@ const uint8_t COLS = 16;                  // playfield columns (= LCD columns)
 const uint8_t ROWS = 4;                   // playfield half-rows (2 LCD rows x 2)
 const uint8_t BOARD_CELLS = COLS * ROWS;  // 64 playable cells
 
-const unsigned long MOVE_INTERVAL_MS = 150; // ms per snake cell (lower = faster)
-const unsigned long SCORE_FLASH_MS   = 500; // score shown after eating food
+const unsigned long MOVE_INTERVAL_MS = 200; // ms per snake cell (lower = faster)
+const unsigned long SCORE_FLASH_MS   = 350; // score shown after eating food
 const unsigned long BLINK_MS         = 400; // entry-page hint blink period
 const unsigned long FOOD_BLINK_MS    = 450; // food is hidden/shown this often
 
@@ -120,28 +119,57 @@ enum GameState : uint8_t {
 // ===================== CELL CONTENT / GLYPH SLOTS ==========================
 const uint8_t KIND_EMPTY = 0, KIND_SNAKE = 1, KIND_FOOD = 2;
 
-// Snake and food are drawn as the SAME single pixel, so only three shapes
-// are needed.  The food is told apart from the snake by blinking
-// (foodVisible in the draw code), not by its shape.
-const uint8_t GLYPH_UPPER = 0;   // dot in the upper half-row
-const uint8_t GLYPH_LOWER = 1;   // dot in the lower half-row
-const uint8_t GLYPH_BOTH  = 2;   // dot in both half-rows
-byte cellGlyphs[3][8];
+// Snake = thin 3px bars.  Food = fat full-width bars, so the target is
+// obvious and never confusable with the body.  Slots 0..6 draw the board;
+// slot 7 is a full square used on the title screen.
+const uint8_t GLYPH_SNAKE_UPPER = 0; // thin bar in the upper half-row
+const uint8_t GLYPH_SNAKE_LOWER = 1; // thin bar in the lower half-row
+const uint8_t GLYPH_SNAKE_BOTH  = 2; // thin bar in both half-rows
+const uint8_t GLYPH_FOOD_UPPER  = 3; // fat bar in the upper half-row
+const uint8_t GLYPH_FOOD_LOWER  = 4; // fat bar in the lower half-row
+const uint8_t GLYPH_MIX_SF      = 5; // snake upper + food lower
+const uint8_t GLYPH_MIX_FS      = 6; // food upper + snake lower
+const uint8_t GLYPH_FULL        = 7; // full square (title decoration)
+const uint8_t GLYPH_NONE        = 0xFF; // draw a space instead
 
-// One single pixel, centred in its half of the character cell:
-//   upper half -> pixel row 2,  lower half -> pixel row 5,  column 2.
-void paintUpperHalf(byte *g) { g[2] = 0x04; }   // ..#..
-void paintLowerHalf(byte *g) { g[5] = 0x04; }   // ..#..
+byte cellGlyphs[8][8];
 
-void buildGlyph(byte *g, bool upper, bool lower) {
-  for (uint8_t i = 0; i < 8; i++) g[i] = 0;
-  if (upper) paintUpperHalf(g);
-  if (lower) paintLowerHalf(g);
+const byte THIN = 0x0E;   // .###.
+const byte FAT  = 0x1F;   // #####
+
+void fillGlyph(byte *g, uint8_t from, uint8_t to, byte value) {
+  for (uint8_t r = from; r < to; r++) g[r] = value;
 }
 
-uint8_t staticGlyph(bool upper, bool lower) {
-  if (upper && lower) return GLYPH_BOTH;
-  return upper ? GLYPH_UPPER : GLYPH_LOWER;
+void buildCellGlyphs() {
+  for (uint8_t i = 0; i < 8; i++) fillGlyph(cellGlyphs[i], 0, 8, 0x00);
+
+  fillGlyph(cellGlyphs[GLYPH_SNAKE_UPPER], 0, 4, THIN);
+  fillGlyph(cellGlyphs[GLYPH_SNAKE_LOWER], 4, 8, THIN);
+  fillGlyph(cellGlyphs[GLYPH_SNAKE_BOTH],  0, 4, THIN);
+  fillGlyph(cellGlyphs[GLYPH_SNAKE_BOTH],  4, 8, THIN);
+
+  fillGlyph(cellGlyphs[GLYPH_FOOD_UPPER], 0, 4, FAT);
+  fillGlyph(cellGlyphs[GLYPH_FOOD_LOWER], 4, 8, FAT);
+
+  fillGlyph(cellGlyphs[GLYPH_MIX_SF], 0, 4, THIN);
+  fillGlyph(cellGlyphs[GLYPH_MIX_SF], 4, 8, FAT);
+  fillGlyph(cellGlyphs[GLYPH_MIX_FS], 0, 4, FAT);
+  fillGlyph(cellGlyphs[GLYPH_MIX_FS], 4, 8, THIN);
+
+  fillGlyph(cellGlyphs[GLYPH_FULL], 0, 8, FAT);
+}
+
+// Which custom character renders a board cell, from the kinds above.
+uint8_t glyphFor(uint8_t upper, uint8_t lower) {
+  if (upper == KIND_SNAKE && lower == KIND_SNAKE) return GLYPH_SNAKE_BOTH;
+  if (upper == KIND_SNAKE && lower == KIND_FOOD)  return GLYPH_MIX_SF;
+  if (upper == KIND_FOOD  && lower == KIND_SNAKE) return GLYPH_MIX_FS;
+  if (upper == KIND_SNAKE) return GLYPH_SNAKE_UPPER;
+  if (upper == KIND_FOOD)  return GLYPH_FOOD_UPPER;
+  if (lower == KIND_SNAKE) return GLYPH_SNAKE_LOWER;
+  if (lower == KIND_FOOD)  return GLYPH_FOOD_LOWER;
+  return GLYPH_NONE;
 }
 
 // ========================== GAME STATES DATA ================================
@@ -183,8 +211,7 @@ bool cellOccupied(uint8_t pos) {
   return false;
 }
 
-// Place food on a free cell.  Random tries first, then a full scan, so it
-// always finds one - the snake only ever occupies 4 of the 64 cells.
+// Place food on a free cell.  Random tries first, then a full scan.
 void spawnFood() {
   for (uint8_t t = 0; t < FOOD_ATTEMPTS; t++) {
     uint8_t pos = (uint8_t)random(BOARD_CELLS);
@@ -206,8 +233,7 @@ void spawnFood() {
 }
 
 // What is actually drawn in a board cell.  The food counts as empty on the
-// "off" phase of its blink - that is the only thing that tells a one-pixel
-// food apart from a one-pixel snake segment.
+// "off" phase of its blink - the fat food bar blinks, the snake stays put.
 uint8_t visibleKind(uint8_t idx) {
   uint8_t k = kindOf(idx);
   if (k == KIND_FOOD && !foodVisible) return KIND_EMPTY;
@@ -224,11 +250,9 @@ void drawBoard() {
       uint8_t upperIdx = upperBase + col;
       uint8_t lowerIdx = upperIdx + COLS;
 
-      bool upper = visibleKind(upperIdx) != KIND_EMPTY;
-      bool lower = visibleKind(lowerIdx) != KIND_EMPTY;
-
-      if (!upper && !lower) lcd->write(' ');
-      else lcd->write(byte(staticGlyph(upper, lower)));
+      uint8_t g = glyphFor(visibleKind(upperIdx), visibleKind(lowerIdx));
+      if (g == GLYPH_NONE) lcd->write(' ');
+      else lcd->write(byte(g));
     }
   }
 }
@@ -247,8 +271,12 @@ void drawEntryHint() {
 void showEntry() {
   state = STATE_ENTRY;
   lcd->clear();
-  lcd->setCursor(5, 0);                       // "SNAKE" = 5 chars -> col 5
+  lcd->setCursor(2, 0);
+  lcd->write(byte(GLYPH_FULL));
+  lcd->setCursor(5, 0);
   lcd->print(F("SNAKE"));
+  lcd->setCursor(13, 0);
+  lcd->write(byte(GLYPH_FULL));
   blinkOn = true;
   blinkMs = millis();
   drawEntryHint();
@@ -274,14 +302,31 @@ void gameOver() {
   lcd->clear();
   lcd->setCursor(3, 0);                 // "GAME OVER" = 9 chars -> col 3
   lcd->print(F("GAME OVER"));
-  printScoreLine();
+  blinkOn = true;
+  blinkMs = millis();
+  drawGameOverHint();
   Serial.println(F("GAME OVER (hit itself) - press an arrow key for the title"));
+}
+
+// Bottom row alternates score / "press arrow key" so restarting is obvious.
+void drawGameOverHint() {
+  lcd->setCursor(0, 1);
+  for (uint8_t i = 0; i < LCD_COLS; i++) lcd->write(' ');
+  if (blinkOn) {
+    lcd->setCursor(0, 1);
+    lcd->print(F("press arrow key"));      // 15 chars -> cols 0..14
+  } else {
+    printScoreLine();
+  }
 }
 
 // Score overlay on the TOP row only: the bottom row still shows the board.
 void enterScoreFlash() {
   state = STATE_FLASH;
   stateStartMs = millis();
+  drawBoard();               // refresh BOTH rows first - the move that ate
+                             // the food has not been drawn yet, so the lower
+                             // LCD row would otherwise stay one tick stale
   lcd->setCursor(0, 0);
   for (uint8_t i = 0; i < LCD_COLS; i++) lcd->write(' ');
   lcd->setCursor(scoreLineStart(), 0);
@@ -340,29 +385,37 @@ void moveSnake() {
   uint8_t newHead = (uint8_t)(newRow * COLS + newCol);
   bool eating = (newHead == foodPos);
 
-  // Self collision.  The snake never grows, so the tail vacates its cell on
-  // every tick - running into the current tail is therefore always legal.
-  uint8_t checkCount = (uint8_t)(snakeLen - 1);
-  for (uint8_t i = 0; i < checkCount; i++) {
+  if (eating) {
+    // Grow: the head moves into the food cell and the tail stays put.
+    uint8_t oldTail = snake[snakeLen - 1];
+    for (uint8_t i = (uint8_t)(snakeLen - 1); i > 0; i--) {
+      snake[i] = snake[i - 1];
+    }
+    snake[0] = newHead;
+    snake[snakeLen] = oldTail;   // keeps the old tail -> one cell longer
+    snakeLen++;
+
+    if (score < 255) score++;
+    spawnFood();
+    enterScoreFlash();
+    return;
+  }
+
+  // Not eating: the tail vacates its cell, so running into it stays legal.
+  for (uint8_t i = 0; i < (uint8_t)(snakeLen - 1); i++) {
     if (snake[i] == newHead) {
       gameOver();
       return;
     }
   }
 
-  // No growth: shift the 4 blocks forward, the tail drops off.
+  // Shift the body forward; the tail cell drops off.
   for (uint8_t i = (uint8_t)(snakeLen - 1); i > 0; i--) {
     snake[i] = snake[i - 1];
   }
   snake[0] = newHead;
 
-  if (eating) {
-    if (score < 255) score++;   // score only - the snake stays 4 blocks long
-    spawnFood();
-    enterScoreFlash();
-  } else {
-    drawBoard();
-  }
+  drawBoard();
 }
 
 // ============================ ARROW-KEY INPUT ==============================
@@ -413,9 +466,10 @@ void pollSerial(unsigned long now) {
       continue;
     }
     if (c == (char)0x1B) { escState = 1; escAtMs = now; continue; }
-    if (escState == 1) {              // expected '[' but got something else
+    if (escState == 1) {              // second byte of the sequence
       escState = 0;
-      if (c != '[') continue;
+      // '[' = normal mode, 'O' = application-cursor mode (some terminals)
+      if (c != '[' && c != 'O') continue;
       escState = 2;
       continue;
     }
@@ -437,14 +491,13 @@ bool beginLcd() {
   if (addr == 0) return false;
 
   lcd = new LiquidCrystal_I2C(addr, LCD_COLS, LCD_ROWS);
+  if (lcd == nullptr) return false;   // out of RAM: report it like a missing LCD
   lcd->init();
   lcd->backlight();
 
-  // three shapes: dot in the upper half, dot in the lower half, both
-  buildGlyph(cellGlyphs[0], true,  false);
-  buildGlyph(cellGlyphs[1], false, true);
-  buildGlyph(cellGlyphs[2], true,  true);
-  for (uint8_t i = 0; i < 3; i++) lcd->createChar(i, cellGlyphs[i]);
+  // eight glyphs: thin snake bars, fat food bars, mixed cell, title square
+  buildCellGlyphs();
+  for (uint8_t i = 0; i < 8; i++) lcd->createChar(i, cellGlyphs[i]);
 
   Serial.print(F("LCD found at 0x"));
   Serial.println(addr, HEX);
@@ -501,9 +554,12 @@ void loop() {
     case STATE_PLAYING:
       if (now - lastMoveMs >= MOVE_INTERVAL_MS) {
         lastMoveMs = now;
-        moveSnake();
+        moveSnake();          // may switch to FLASH or GAMEOVER
       }
-      if (now - foodBlinkMs >= FOOD_BLINK_MS) {  // blink the food dot
+      // Only blink while still playing: moveSnake() can change the state,
+      // and a redraw here would wipe a GAME OVER / score screen that was
+      // just drawn in this same pass through loop().
+      if (state == STATE_PLAYING && now - foodBlinkMs >= FOOD_BLINK_MS) {
         foodBlinkMs = now;
         foodVisible = !foodVisible;
         drawBoard();
@@ -515,6 +571,11 @@ void loop() {
       break;
 
     case STATE_GAMEOVER:
-      break;                        // wait for an arrow key
+      if (now - blinkMs >= BLINK_MS) {   // alternate score / restart hint
+        blinkMs = now;
+        blinkOn = !blinkOn;
+        drawGameOverHint();
+      }
+      break;
   }
 }
