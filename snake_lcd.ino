@@ -1,25 +1,30 @@
 /* ==========================================================================
- *  SNAKE  -  Arduino Uno + JHD162A 16x2 LCD (4-pin I2C version)
+ *  SNAKE  -  Arduino Uno + JHD162A 16x2 LCD (I2C) + HW-004 joystick
  * ==========================================================================
  *
  *  A small, standalone Snake game on a JHD162A with a mounted I2C backpack
  *  (4 pins, only two Arduino pins needed).
  *
- *  The game is controlled ONLY with the arrow keys, through the Serial
- *  Monitor (115200 baud).  No push buttons are used.
+ *  The game is controlled ONLY with the HW-004 joystick module: push the
+ *  stick to steer, press the stick button (SW) to start / restart.
  *
  *  --------------------------------------------------------------------------
  *  HARDWARE / WIRING
  *  --------------------------------------------------------------------------
  *    - Arduino Uno (or compatible)
  *    - JHD162A 16x2 LCD with 4-pin I2C backpack (PCF8574)
+ *    - HW-004 joystick module (5 pins: GND, +5V, VRx, VRy, SW)
  *
- *    LCD pin | Name | Arduino
- *    --------+------+--------
- *      GND   | GND  | GND
- *      VCC   | VCC  | 5V
- *      SDA   | SDA  | A4
- *      SCL   | SCL  | A5
+ *    LCD pin | Name | Arduino          Joystick pin | Name | Arduino
+ *    --------+------+--------          -------------+------+--------
+ *      GND   | GND  | GND                GND        | GND  | GND
+ *      VCC   | VCC  | 5V                 +5V        | 5V   | 5V
+ *      SDA   | SDA  | A4                 VRx        | VRx  | A0
+ *      SCL   | SCL  | A5                 VRy        | VRy  | A1
+ *                                       SW         | SW   | D2
+ *
+ *    D2 is read with INPUT_PULLUP: SW closes to GND when the stick is
+ *    pressed.  A0/A1 read the stick axes (~512 at centre, 0..1023 range).
  *
  *    The small blue trimmer on the backpack sets the contrast.
  *    The backpack jumper enables the backlight.
@@ -29,19 +34,19 @@
  *    answers, the built-in LED (D13) blinks fast and the reason is printed
  *    on the Serial Monitor - that means the backpack is not wired right.
  *
- *    A4/A5 are the only pins the LCD uses, so D2..D13 and A0..A3 are free.
+ *    A4/A5 are the only pins the LCD uses; the joystick takes A0, A1 and D2.
  *
  *  --------------------------------------------------------------------------
  *  HOW TO PLAY
  *  --------------------------------------------------------------------------
  *    1. Upload the sketch.
- *    2. Open the Serial Monitor at 115200 baud ("No line ending").
- *    3. The ENTRY PAGE ("SNAKE" + blinking "press arrow key") appears and
- *       stays there until you press an arrow key - that starts the game.
- *    4. Use the arrow keys of your keyboard:
- *           ^ = up,  v = down,  < = left,  > = right
- *    5. After GAME OVER the same entry page appears again; press any
- *       arrow key there to play another round.
+ *    2. The ENTRY PAGE ("SNAKE" + blinking "push stick") appears and stays
+ *       there until you tilt the joystick in any direction - that starts
+ *       the game.
+ *    3. Tilt the stick up / down / left / right to steer the snake.
+ *       Pressing the stick button (SW) also starts / restarts a round.
+ *    4. After GAME OVER the same entry page appears again; tilt the stick
+ *       (or press SW) there to play another round.
  *
  *    Libraries (Library Manager): "LiquidCrystal I2C" by Frank de Brabander.
  *
@@ -55,10 +60,10 @@
  *
  *        16 columns x 4 half-rows  =  64 playable cells
  *
- *    The snake is drawn as thin 3-pixel bars, so the whole body reads as
- *    one slim connected line.  The food is a FAT full-width bar that blinks
- *    (on/off every 450 ms) - the shapes are different, so the target never
- *    gets confused with the body.
+ *    The snake is drawn as thin 3-pixel bars - each cell leaves only a 2px
+ *    gap, so the body reads as one slim connected line.  The food is a FAT
+ *    full-width bar that blinks (on/off every 450 ms) - the shapes are
+ *    different, so the target never gets confused with the body.
  *
  *    Eight custom characters are used: thin snake bars (upper/lower/both),
  *    fat food bars (upper/lower), the two mixed cells where food and snake
@@ -88,6 +93,22 @@ LiquidCrystal_I2C *lcd = nullptr;   // created in setup() once the address is kn
 const uint8_t LCD_COLS = 16;        // physical LCD size
 const uint8_t LCD_ROWS = 2;
 
+// ========================== JOYSTICK (HW-004) ==============================
+// VRx on A0, VRy on A1: analog axes, ~512 at centre, 0..1023 full range.
+// SW on D2 with INPUT_PULLUP: closes to GND when the stick is pressed.
+const uint8_t JOY_VRX = A0;
+const uint8_t JOY_VRY = A1;
+const uint8_t JOY_SW  = 2;
+
+// Values within JOY_DEADBAND of the calibrated centre count as centred.
+// Pots rarely sit at exactly 512, so the centre is sampled at boot.
+const int JOY_DEADBAND = 120;   // ~12% of full travel, snappy but jitter-safe
+const int JOY_AXIS_MARGIN = 60; // hysteresis: other axis must beat sticky one by this much
+
+const unsigned long JOY_BTN_DEBOUNCE_MS = 40; // SW debounce window
+
+int joyCenterX = 512, joyCenterY = 512;  // sampled in setup()
+
 // ========================== GAME TUNING ====================================
 const uint8_t COLS = 16;                  // playfield columns (= LCD columns)
 const uint8_t ROWS = 4;                   // playfield half-rows (2 LCD rows x 2)
@@ -102,8 +123,8 @@ const uint8_t START_LENGTH  = 4;   // snake length: fixed, never changes
 const uint8_t FOOD_ATTEMPTS = 64;  // random tries before scanning every cell
 
 // ========================== DIRECTIONS =====================================
-// The opposite of any direction is (dir ^ 1); the arrow-key code of a
-// direction is the same index, so decoding a key gives the direction.
+// The opposite of any direction is (dir ^ 1); the joystick direction code
+// is the same index, so decoding a tilt gives the direction.
 const uint8_t DIR_UP = 0, DIR_DOWN = 1, DIR_LEFT = 2, DIR_RIGHT = 3;
 const int8_t  DIR_DX[4] = { 0, 0, -1, 1 };   // column delta per direction
 const int8_t  DIR_DY[4] = { -1, 1, 0, 0 };   // half-row delta per direction
@@ -134,7 +155,7 @@ const uint8_t GLYPH_NONE        = 0xFF; // draw a space instead
 
 byte cellGlyphs[8][8];
 
-const byte THIN = 0x0E;   // .###.
+const byte THIN = 0x0E;   // .###.  3px bar - only 2px gap between cells, reads connected
 const byte FAT  = 0x1F;   // #####
 
 void fillGlyph(byte *g, uint8_t from, uint8_t to, byte value) {
@@ -179,7 +200,7 @@ uint8_t snakeLen = START_LENGTH;
 uint8_t foodPos   = 0;          // board index of the food (0..63)
 uint8_t score     = 0;
 uint8_t dir       = DIR_RIGHT;  // direction the head currently moves
-uint8_t pendingDir = DIR_RIGHT; // direction queued by the arrow keys
+uint8_t pendingDir = DIR_RIGHT; // direction queued by the joystick
 GameState state = STATE_ENTRY;
 
 unsigned long stateStartMs = 0;  // when the current state began
@@ -262,7 +283,7 @@ void drawBoard() {
 void drawEntryHint() {
   lcd->setCursor(0, 1);
   if (blinkOn) {
-    lcd->print(F("press arrow key"));        // 15 chars -> cols 0..14
+    lcd->print(F("push joystick!"));       // 14 chars -> cols 0..13
   } else {
     for (uint8_t i = 0; i < LCD_COLS; i++) lcd->write(' ');
   }
@@ -280,7 +301,7 @@ void showEntry() {
   blinkOn = true;
   blinkMs = millis();
   drawEntryHint();
-  Serial.println(F("Entry page - press an arrow key to start"));
+  Serial.println(F("Entry page - push the joystick to start"));
 }
 
 // Where a "Score: n" line is centred (1, 2 or 3 digits).
@@ -305,16 +326,16 @@ void gameOver() {
   blinkOn = true;
   blinkMs = millis();
   drawGameOverHint();
-  Serial.println(F("GAME OVER (hit itself) - press an arrow key for the title"));
+  Serial.println(F("GAME OVER (hit itself) - push the joystick for the title"));
 }
 
-// Bottom row alternates score / "press arrow key" so restarting is obvious.
+// Bottom row alternates score / "push joystick" so restarting is obvious.
 void drawGameOverHint() {
   lcd->setCursor(0, 1);
   for (uint8_t i = 0; i < LCD_COLS; i++) lcd->write(' ');
   if (blinkOn) {
     lcd->setCursor(0, 1);
-    lcd->print(F("press arrow key"));      // 15 chars -> cols 0..14
+    lcd->print(F("push joystick!"));    // 14 chars -> cols 0..13
   } else {
     printScoreLine();
   }
@@ -418,16 +439,42 @@ void moveSnake() {
   drawBoard();
 }
 
-// ============================ ARROW-KEY INPUT ==============================
-// The Serial Monitor sends the usual ANSI escape sequence for an arrow key:
-//     ESC  '['  'A' (up) / 'B' (down) / 'C' (right) / 'D' (left)
-// Everything else (newlines, stray characters) is ignored.
-const unsigned long ESC_TIMEOUT_MS = 50;
-uint8_t        escState = 0;   // 0 = idle, 1 = saw ESC, 2 = saw ESC '['
-unsigned long  escAtMs  = 0;
+// ============================ JOYSTICK INPUT ===============================
+// HW-004 stick: VRx/VRy are analog axes (~512 centre, 0..1023 range), SW
+// is a momentary button to GND (active LOW, read with INPUT_PULLUP).
+// Direction is edge-detected: a tilt fires once when the stick leaves the
+// dead zone, and does not fire again until it returns to centre.  This
+// stops a held stick from spamming turns every loop pass.
+int      joyLastDir = -1;        // -1 = centred, 0..3 = direction currently held
+int      joyAxis = 0;            // sticky dominant axis: 0 = X (L/R), 1 = Y (U/D)
+bool     joyBtnStable = true;    // debounced SW state (true = released)
+bool     joyBtnLast   = true;    // previous raw SW sample
+unsigned long joyBtnMs = 0;      // last time the raw SW sample changed
 
-// An arrow key arrived: start / steer / restart, depending on the state.
-void onArrowKey(uint8_t d) {
+// Map the current stick position to DIR_* (or -1 when within the dead
+// band around the calibrated centre).  The dominant axis is STICKY: once
+// X or Y wins, the other one must beat it by JOY_AXIS_MARGIN before the
+// choice flips.  Without this, a near-diagonal hold flickers between two
+// decoded directions with ADC noise and the snake zigzags (R,D,R,D...).
+int readJoystickDir() {
+  int x = analogRead(JOY_VRX) - joyCenterX;
+  int y = analogRead(JOY_VRY) - joyCenterY;
+  int ax = abs(x), ay = abs(y);
+
+  if (ax < JOY_DEADBAND && ay < JOY_DEADBAND) return -1;
+
+  if (joyAxis == 0) {
+    if (ay > ax + JOY_AXIS_MARGIN) joyAxis = 1;
+  } else {
+    if (ax > ay + JOY_AXIS_MARGIN) joyAxis = 0;
+  }
+
+  if (joyAxis == 0) return x < 0 ? DIR_LEFT : DIR_RIGHT;
+  return y < 0 ? DIR_UP : DIR_DOWN;
+}
+
+// A stick tilt arrived: start / steer / restart, depending on the state.
+void onJoystickDir(uint8_t d) {
   switch (state) {
     case STATE_PLAYING:
       setDirection(d);
@@ -440,7 +487,7 @@ void onArrowKey(uint8_t d) {
       showEntry();          // every game ends on the entry page again
       break;
     case STATE_ENTRY:
-      startGame();          // any arrow key starts a round...
+      startGame();          // any tilt starts a round...
       setDirection(d);      // ...and the pressed direction counts right away
       break;
     default:
@@ -448,32 +495,41 @@ void onArrowKey(uint8_t d) {
   }
 }
 
-void pollSerial(unsigned long now) {
-  if (escState && (now - escAtMs) >= ESC_TIMEOUT_MS) escState = 0;
+// Stick button (SW) pressed: acts as a plain confirm - start a round from
+// the entry page, dismiss the score flash, or leave GAME OVER.
+void onJoystickButton() {
+  switch (state) {
+    case STATE_FLASH:
+      endScoreFlash();
+      break;
+    case STATE_GAMEOVER:
+      showEntry();
+      break;
+    case STATE_ENTRY:
+      startGame();
+      break;
+    default:
+      break;
+  }
+}
 
-  while (Serial.available()) {
-    char c = (char)Serial.read();
+void pollJoystick(unsigned long now) {
+  // ---- direction (edge-detected) ----
+  int d = readJoystickDir();
+  if (d != joyLastDir) {
+    if (d >= 0) onJoystickDir((uint8_t)d);  // centre -> tilt: fire once
+    joyLastDir = d;
+  }
 
-    if (escState == 2) {              // third byte of the arrow sequence
-      escState = 0;
-      switch (c) {
-        case 'A': onArrowKey(DIR_UP);    break;
-        case 'B': onArrowKey(DIR_DOWN);  break;
-        case 'C': onArrowKey(DIR_RIGHT); break;
-        case 'D': onArrowKey(DIR_LEFT);  break;
-        default:  break;
-      }
-      continue;
-    }
-    if (c == (char)0x1B) { escState = 1; escAtMs = now; continue; }
-    if (escState == 1) {              // second byte of the sequence
-      escState = 0;
-      // '[' = normal mode, 'O' = application-cursor mode (some terminals)
-      if (c != '[' && c != 'O') continue;
-      escState = 2;
-      continue;
-    }
-    // any byte outside a sequence is not an arrow key -> ignored
+  // ---- button (debounced, edge-triggered) ----
+  bool raw = digitalRead(JOY_SW);
+  if (raw != joyBtnLast) {
+    joyBtnLast = raw;
+    joyBtnMs   = now;
+  }
+  if ((now - joyBtnMs) >= JOY_BTN_DEBOUNCE_MS && raw != joyBtnStable) {
+    joyBtnStable = raw;
+    if (!joyBtnStable) onJoystickButton();  // pressed (active LOW)
   }
 }
 
@@ -518,7 +574,23 @@ void lcdErrorBlink() {
 // ============================ MAIN =========================================
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("SNAKE - arrow keys only (115200, no line ending)"));
+  Serial.println(F("SNAKE - HW-004 joystick (tilt to steer, press SW to start)"));
+
+  pinMode(JOY_SW, INPUT_PULLUP);   // SW closes to GND when the stick is pressed
+
+  // Calibrate the stick centre (leave it untouched): average a few reads
+  // so off-centre pots and tolerances don't create a phantom tilt.
+  {
+    long sx = 0, sy = 0;
+    const uint8_t SAMPLES = 32;
+    for (uint8_t i = 0; i < SAMPLES; i++) {
+      sx += analogRead(JOY_VRX);
+      sy += analogRead(JOY_VRY);
+      delay(2);
+    }
+    joyCenterX = (int)(sx / SAMPLES);
+    joyCenterY = (int)(sy / SAMPLES);
+  }
 
   Wire.begin();
   if (!beginLcd()) {
@@ -526,25 +598,25 @@ void setup() {
     lcdErrorBlink();
   }
 
-  // A0 is left floating (nothing is connected to it): it picks up noise,
+  // A2 is left floating (nothing is connected to it): it picks up noise,
   // which is mixed with micros() so the food pattern changes every reset.
   unsigned long seed = micros();
   for (uint8_t i = 0; i < 8; i++) {
-    seed = (seed << 3) ^ (seed >> 5) ^ (unsigned long)analogRead(A0);
+    seed = (seed << 3) ^ (seed >> 5) ^ (unsigned long)analogRead(A2);
   }
   randomSeed(seed);
 
-  // Entry page stays on screen until the first arrow key is pressed
+  // Entry page stays on screen until the first joystick tilt / SW press
   showEntry();
 }
 
 void loop() {
   unsigned long now = millis();
-  pollSerial(now);
+  pollJoystick(now);
 
   switch (state) {
     case STATE_ENTRY:
-      if (now - blinkMs >= BLINK_MS) {   // blink "press arrow key"
+      if (now - blinkMs >= BLINK_MS) {   // blink "push joystick!"
         blinkMs = now;
         blinkOn = !blinkOn;
         drawEntryHint();
